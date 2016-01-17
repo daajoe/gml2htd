@@ -18,10 +18,12 @@ import logging
 import logging.config
 logging.config.fileConfig('%s/logging.conf'%os_path.dirname(os_path.realpath(__file__)))
 
-from itertools import imap, izip
+from bz2 import BZ2File
 import checksum
 import contextlib
+from detect_compression import file_type
 import hashlib
+from itertools import imap, izip
 import networkx as nx
 import optparse
 from os import path as os_path
@@ -41,10 +43,13 @@ def options():
     usage  = "usage: %prog [options] [files]"
     parser = optparse.OptionParser(usage=usage)
     parser.add_option("-o", "--output", dest="out", type="string", help="Output file", default=None)
+    parser.add_option("-s", "--seed", dest="seed", type="string", help="Random Generator Seed [Default time]", default=None)
     opts, files = parser.parse_args(sys.argv[1:])
     if len(files)>1:
         logging.critical('Supports at most one input file.')
         exit(1)
+    if opts.seed is not None:
+        opts.seed=imap(lambda x: int(x), opts.seed.split(','))
     return opts, files[0]
 
 
@@ -60,6 +65,21 @@ def selective_output(filename=None):
         if fh:
             fh.close()
 
+@contextlib.contextmanager
+def zopen(filename=None):
+    ftype = file_type(filename)
+    if ftype == 'bz2':
+        fh = BZ2File(filename)
+    elif ftype == None:
+        fh = open(filename)
+    else:
+        raise TypeError('File type "%s" not supported' %ftype)
+    try:
+        yield fh
+    finally:
+        if fh:
+            fh.close()
+
 def tab(x,h,symtab):
     if symtab.has_key(x):
         return symtab[x]
@@ -69,19 +89,28 @@ def tab(x,h,symtab):
         return symtab[x]
 
 def parse_and_run(filename,output):
-    output.write('folder,filename,checksum,num_vertices,num_edges,width,algorithm,ordering,runtime in s\n')
+    output.write('folder,filename,checksum,num_vertices,num_edges,width,algorithm,ordering,seed,parsing and graph gen in s,runtime in s\n')
     logging.info('Creating checksum')
     file_checksum=checksum.hashfile(open(filename, 'rb'), hashlib.sha256())
     start = timeit.default_timer()
     h=htd.Hypergraph(0)
     logging.info('Reading lp file and creating hypergraph...')
     symtab={}
-    with open(filename) as f:
+    with zopen(filename) as f:
         for line in f:
             if line.startswith('edge'):
-                x,y=line[5:-3].split(',')
+                s=line[5:-3].split(',')
+                if len(s)>2:
+                    continue
+                x,y=s
                 h.add_edge(tab(x,h,symtab),tab(y,h,symtab))
+    stop = timeit.default_timer()
+    output.flush()
+    return h, file_checksum, stop-start
+
+def compute_decomposition(filename,file_checksum,h,parse_time,output,seed):
     logging.info('Determining tree decomposition...')
+    start = timeit.default_timer()
     ordering = htd.MinFillOrdering()
     be_decomp = htd.TDecompBE(ordering)
     decomp=be_decomp.decompose(h)
@@ -90,12 +119,17 @@ def parse_and_run(filename,output):
     #    print decomp.bag_content(v)
     logging.info("width=%s", decomp.width())
     logging.info('Done')
-    output.write('%s,%s,%s,%i, %i, %i,%s,%s,%f\n' %(os_path.dirname(filename), os_path.basename(filename), file_checksum, h.num_vertices(), h.num_edges(), decomp.width(), 'be', 'minfill', stop-start))
+    output.write('%s,%s,%s,%i, %i, %i,%s,%s,%i,%f,%f\n' %(os_path.dirname(filename), os_path.basename(filename), file_checksum, h.num_vertices(), h.num_edges(), decomp.width(), 'be', 'minfill', seed, parse_time,stop-start))
     output.flush()
 
 if __name__ == '__main__':
     opts,filename=options()
-    s=None
     with selective_output(opts.out) as s:
-        parse_and_run(filename,s)
+        h,file_checksum,parse_time=parse_and_run(filename=filename,output=s)
+        for seed in opts.seed:
+            if seed in (None,0):
+                htd.set_seed2time()
+            else:
+                htd.set_seed(seed)
+            compute_decomposition(filename,file_checksum=file_checksum,h=h,parse_time=parse_time,output=s,seed=seed)
     exit(0)
