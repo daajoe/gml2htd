@@ -35,7 +35,7 @@ import timeit
 import htd
 
 
-if select.select([sys.stdin,],[],[],0.0)[0]:
+if sys.stdin.isatty():
     logging.critical("Please use file input instead of stdin.")
     exit(1)
 
